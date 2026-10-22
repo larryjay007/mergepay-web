@@ -55,7 +55,25 @@ export function useDialogFocus({
   const slotId = useId();
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
+  // Read through a ref, not the effect's dependencies. A dialog locks itself
+  // while a request is in flight (`dismissible={!busy}`), and a dependency on
+  // the flag would tear the whole effect down and rebuild it each time: focus
+  // would jump to the page behind and then back to the first control, and the
+  // dialog would be pushed on top of the Escape stack, taking the key from any
+  // dialog stacked above it.
+  const dismissibleRef = useRef(dismissible);
+  dismissibleRef.current = dismissible;
   const previousFocusRef = useRef<HTMLElement | null>(null);
+  // Whatever had focus when the dialog opened, noted while rendering, before the
+  // commit that mounts it. By the time an effect runs, a field with React's
+  // `autoFocus` has already taken focus, so `document.activeElement` would be a
+  // control inside the dialog and focus could never return to the trigger.
+  const openerRef = useRef<HTMLElement | null>(null);
+  const wasOpenRef = useRef(false);
+  if (open && !wasOpenRef.current && typeof document !== "undefined") {
+    openerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  }
+  wasOpenRef.current = open;
 
   const listFocusable = useCallback((root: HTMLElement | null) => {
     if (!root) return [];
@@ -72,8 +90,20 @@ export function useDialogFocus({
     if (!open) return;
 
     dialogStack.push(slotId);
-    previousFocusRef.current =
-      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    previousFocusRef.current = openerRef.current;
+
+    // A control inside the dialog that already has focus took it itself while
+    // mounting (React's `autoFocus`). That is an explicit choice, like
+    // `data-autofocus`, and the "primary action" rule below must not undo it.
+    // Focus the focus-containment listener pulls in later does not count.
+    const alreadyFocused = document.activeElement;
+    const selfFocused =
+      panelRef.current &&
+      alreadyFocused instanceof HTMLElement &&
+      alreadyFocused !== panelRef.current &&
+      panelRef.current.contains(alreadyFocused)
+        ? alreadyFocused
+        : null;
 
     const panelFocusable = () => listFocusable(panelRef.current);
     const contentFocusable = () => listFocusable(contentRef?.current ?? null);
@@ -85,7 +115,7 @@ export function useDialogFocus({
       if (
         shouldCloseOnEscape({
           key: e.key,
-          dismissible,
+          dismissible: dismissibleRef.current,
           isTopmost: dialogStack.isTopmost(slotId),
         })
       ) {
@@ -118,6 +148,8 @@ export function useDialogFocus({
     // `open`, and with an exit animation its controls may not be in the DOM
     // yet when this effect runs.
     const frame = requestAnimationFrame(() => {
+      if (selfFocused?.isConnected && document.activeElement === selfFocused) return;
+
       const body = contentFocusable();
       if (body.length > 0) {
         const index = pickInitialFocusIndex(
@@ -159,5 +191,5 @@ export function useDialogFocus({
         previous.focus();
       }
     };
-  }, [open, slotId, dismissible, panelRef, contentRef, listFocusable]);
+  }, [open, slotId, panelRef, contentRef, listFocusable]);
 }
