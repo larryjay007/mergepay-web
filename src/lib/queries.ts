@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   useInfiniteQuery,
   useMutation,
@@ -98,15 +98,23 @@ export const SETTLEMENT_POLL_INTERVAL_MS = 3_000;
  * dead upstream endpoints.
  */
 export const SETTLEMENT_POLL_MAX_PERSISTENT_FAILURES = 3;
+/**
+ * Longest a settlement is polled while the API keeps answering that it is
+ * still pending. Stellar closes a ledger every few seconds, so a payment that
+ * is still unconfirmed after this long needs the user's attention rather than
+ * more silent polling (and a dialog that cannot be closed meanwhile).
+ */
+export const SETTLEMENT_POLL_MAX_DURATION_MS = 120_000;
 
 /**
  * Returns the next poll delay (in ms) for a settlement-status query, or
  * `false` to stop polling once the response reached a terminal state.
  * Exported separately so the stop behavior is unit-testable.
  *
- * The function short-circuits to `false` in three situations:
+ * The function short-circuits to `false` in these situations:
  *  - the latest response status is terminal (`confirmed` / `failed`),
- *  - no data has ever loaded and failures have piled up, or
+ *  - no data has ever loaded and failures have piled up,
+ *  - polling has run for {@link SETTLEMENT_POLL_MAX_DURATION_MS} (`timedOut`), or
  *  - the calling site passes nothing (defensive default).
  */
 export function settlementPollInterval(query: {
@@ -114,9 +122,11 @@ export function settlementPollInterval(query: {
     data?: { status?: string };
   };
   failureCount?: number;
+  timedOut?: boolean;
 }): number | false {
   const status = query.state.data?.status;
   if (status === "confirmed" || status === "failed") return false;
+  if (query.timedOut) return false;
 
   // Bound load on a broken upstream. With `retry: false`, each failed
   // refetch increments `failureCount` by 1; stopping after the cap keeps
@@ -504,6 +514,10 @@ export function useSettlementStatus(
   const failureCount = useRef(0);
   const terminalSettlementId = useRef<string | null>(null);
   const [pollingStalled, setPollingStalled] = useState(false);
+  const [pollingTimedOut, setPollingTimedOut] = useState(false);
+  // Bumped by `restartPolling` so the deadline effect below starts a new window.
+  const [pollWindow, setPollWindow] = useState(0);
+  const timedOutRef = useRef(false);
   const invalidate = useInvalidator();
 
   const query = useQuery({
@@ -515,6 +529,7 @@ export function useSettlementStatus(
       settlementPollInterval({
         state: { data: q.state.data as { status?: string } | undefined },
         failureCount: failureCount.current,
+        timedOut: timedOutRef.current,
       }),
     refetchIntervalInBackground: false,
     // Cadence is handled by the polling interval — retrying on transient
@@ -564,7 +579,36 @@ export function useSettlementStatus(
     }
   }, [query.isError, query.isSuccess, query.errorUpdatedAt, query.dataUpdatedAt]);
 
-  return { ...query, pollingStalled };
+  // Give up polling after SETTLEMENT_POLL_MAX_DURATION_MS even if every poll
+  // succeeds and the API keeps saying "pending". The window starts when polling
+  // is enabled for a settlement and is cleared when it ends (a terminal status
+  // flips `enabled` off) or the component unmounts.
+  useEffect(() => {
+    timedOutRef.current = false;
+    setPollingTimedOut(false);
+    if (!settlementId || !enabled) return;
+    const timer = setTimeout(() => {
+      timedOutRef.current = true;
+      setPollingTimedOut(true);
+    }, SETTLEMENT_POLL_MAX_DURATION_MS);
+    return () => clearTimeout(timer);
+  }, [settlementId, enabled, pollWindow]);
+
+  /**
+   * Start a fresh polling window after the user asked to check again. Pair it
+   * with `refetch()`: the refetch answers now, and polling resumes from there.
+   */
+  const restartPolling = useCallback(() => {
+    failureCount.current = 0;
+    // Cleared here as well as by the effect: a refetch that settles before React
+    // commits would otherwise re-read the interval while the old window still reads "over".
+    timedOutRef.current = false;
+    setPollingStalled(false);
+    setPollingTimedOut(false);
+    setPollWindow((n) => n + 1);
+  }, []);
+
+  return { ...query, pollingStalled, pollingTimedOut, restartPolling };
 }
 
 // ---------------------------------------------------------------------------

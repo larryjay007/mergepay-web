@@ -52,6 +52,7 @@ import { signXdr } from "@/lib/stellar";
 import { formatMoney } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { isNetworkMismatch, type SettleTarget } from "@/lib/useSettlementFlow";
+import { notifySettlementFailure } from "@/lib/settlementToasts";
 import {
   SettlementVerificationError,
   classifySettlementError,
@@ -171,6 +172,9 @@ export function SettlementModal({ open, onClose, groupId, target, onSettled, tim
     setError(classified);
     setFailedAt(at);
     setStep("error");
+    // The panel is only seen while the modal is open; the toast is how the
+    // outcome reaches a user who has looked away or closed it.
+    notifySettlementFailure(classified, { submitted: at === "submitting" && classified.kind !== "failed" });
   }
 
   async function finish(settlement: Settlement, memo: string, isCurrent: () => boolean) {

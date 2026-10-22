@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as StellarSdk from "@stellar/stellar-sdk";
+import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { signXdr } from "@/lib/stellar";
 import { NETWORK_PASSPHRASE } from "@/lib/constants";
@@ -11,7 +12,7 @@ import { SettlementModal, type SettlementModalProps } from "./SettlementModal";
 
 const mutateAsync = vi.fn();
 
-vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
+vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() } }));
 
 vi.mock("framer-motion", async (importOriginal) => {
   const actual = await importOriginal<typeof import("framer-motion")>();
@@ -165,6 +166,9 @@ describe("SettlementModal", () => {
     expect(screen.getByTestId("memo-badge")).toHaveTextContent("rent-0526");
     expect(screen.getByTestId("memo-badge")).toHaveAttribute("data-severity", "none");
     expect(onSettled).toHaveBeenCalledWith(expect.objectContaining({ status: "confirmed" }));
+    expect(toast.success).toHaveBeenCalledWith("Settled on Stellar");
+    expect(toast.error).not.toHaveBeenCalled();
+    expect(toast.warning).not.toHaveBeenCalled();
   });
 
   it("signs the envelope captured before the clock moved on", async () => {
@@ -211,6 +215,13 @@ describe("SettlementModal", () => {
     expect(screen.getByText(/Nothing was submitted/)).toBeInTheDocument();
     expect(mutateAsync).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: /try again/i })).toBeEnabled();
+    // Declining is a warning, not an error, and nothing was sent.
+    expect(toast.warning).toHaveBeenCalledWith(
+      "Signature declined",
+      expect.objectContaining({ description: expect.stringContaining("Nothing was sent"), id: "settlement-failure" })
+    );
+    expect(toast.error).not.toHaveBeenCalled();
+    expect(toast.success).not.toHaveBeenCalled();
   });
 
   it("times out when the wallet never answers", async () => {
@@ -222,6 +233,15 @@ describe("SettlementModal", () => {
     expect(await screen.findByText("Timed out")).toBeInTheDocument();
     expect(screen.getByText(/Freighter didn't respond/)).toBeInTheDocument();
     expect(mutateAsync).not.toHaveBeenCalled();
+    // Timed out before anything was signed: a warning that does not suggest a payment is in flight.
+    expect(toast.warning).toHaveBeenCalledWith(
+      "Timed out",
+      expect.objectContaining({ description: expect.stringContaining("Freighter didn't respond") })
+    );
+    expect(toast.warning).not.toHaveBeenCalledWith(
+      "Timed out",
+      expect.objectContaining({ description: expect.stringContaining("may still go through") })
+    );
   });
 
   it("offers a status check, not a second payment, after a network timeout", async () => {
@@ -233,6 +253,11 @@ describe("SettlementModal", () => {
 
     expect(await screen.findByText("Timed out")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /try again/i })).not.toBeInTheDocument();
+    // The signed payment already reached Mergepay, so the toast says it may still confirm.
+    expect(toast.warning).toHaveBeenCalledWith(
+      "Timed out",
+      expect.objectContaining({ description: expect.stringContaining("may still go through") })
+    );
 
     vi.mocked(api.getSettlement).mockResolvedValue({ settlement: settlement("confirmed") });
     fireEvent.click(screen.getByRole("button", { name: /check status/i }));
@@ -272,6 +297,8 @@ describe("SettlementModal", () => {
     expect(await screen.findByText("Payment details don't match")).toBeInTheDocument();
     expect(screen.queryByText("Settled!")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /try again|check status/i })).not.toBeInTheDocument();
+    expect(toast.error).toHaveBeenCalledWith("Payment details don't match", expect.objectContaining({ id: "settlement-failure" }));
+    expect(toast.success).not.toHaveBeenCalled();
   });
 
   it("allows a fresh attempt when Stellar rejects the payment", async () => {
@@ -282,6 +309,11 @@ describe("SettlementModal", () => {
 
     expect(await screen.findByText("Payment failed")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /try again/i })).toBeInTheDocument();
+    expect(toast.error).toHaveBeenCalledWith(
+      "Payment failed",
+      expect.objectContaining({ description: "Stellar rejected this payment. No funds moved.", id: "settlement-failure" })
+    );
+    expect(toast.success).not.toHaveBeenCalled();
   });
 
   it("cancels cleanly while waiting for the wallet", async () => {
@@ -297,6 +329,9 @@ describe("SettlementModal", () => {
     resolveSign(intent().xdr);
     await new Promise((r) => setTimeout(r, 10));
     expect(mutateAsync).not.toHaveBeenCalled();
+    // The user cancelled; they do not need a toast about their own choice.
+    expect(toast.error).not.toHaveBeenCalled();
+    expect(toast.warning).not.toHaveBeenCalled();
   });
 
   it("cannot be dismissed while the payment is being submitted", async () => {

@@ -470,6 +470,15 @@ export function classifySettlementError(error: unknown): ClassifiedSettlementErr
   if (code === "network" || (error instanceof TypeError && /fetch|network/i.test(message))) {
     return { kind: "network", title: "Network error", message: message || "Couldn't reach the network. Check your connection." };
   }
+  // An API error (`ApiRequestError`) carries a string `code` too, but it is the
+  // server's, so it must not be reported as a wallet problem. Its numeric HTTP
+  // `status` tells them apart; 0 means the request never reached the server.
+  const status = (error as { status?: unknown } | null)?.status;
+  if (typeof status === "number") {
+    return status === 0
+      ? { kind: "network", title: "Network error", message: message || "Couldn't reach the network. Check your connection." }
+      : { kind: "unknown", title: "Settlement failed", message: message || "Something went wrong. Please try again." };
+  }
   if (typeof code === "string" && code !== "") {
     return { kind: "unknown", title: "Wallet error", message: message || "The wallet reported an error." };
   }
